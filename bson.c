@@ -533,9 +533,11 @@ pack_meta_dict(lua_State *L, struct bson *b, bool isarray, int depth) {
 
 static void
 pack_dict(lua_State *L, struct bson *b, bool isarray, int depth) {
-	if (luaL_getmetafield(L, -1, "__pairs") != LUA_TNIL) {
+	int ftype = luaL_getmetafiled(L, -1, "__pairs");
+	if (ftype == LUA_TFUNCTION) {
 		pack_meta_dict(L, b, isarray, depth);
 	} else {
+		lua_pop(L, 1);
 		pack_simple_dict(L, b, isarray, depth);
 	}
 }
