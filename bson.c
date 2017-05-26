@@ -15,7 +15,7 @@
 
 #include <winsock2.h>
 
-static void	
+static void
 init_winsock() {
 	WSADATA wsaData;
 	WSAStartup(MAKEWORD(2,2), &wsaData);
@@ -23,12 +23,13 @@ init_winsock() {
 
 #else
 
-static void	
+static void
 init_winsock() {
 }
 
 #endif
 
+#define DEFAULT_EXT 20
 #define DEFAULT_CAP 64
 #define MAX_NUMBER 1024
 // avoid circular reference while encoding
@@ -71,6 +72,31 @@ struct bson_reader {
 	const uint8_t * ptr;
 	int size;
 };
+
+struct json{
+	int cap;
+	int size;
+	uint8_t * ptr;
+};
+
+static inline void 
+json_create(struct json *j, int cap){
+	j->size = 0;
+	j->cap = cap;
+	j->ptr = (uint8_t*)malloc(sizeof(uint8_t) * cap);
+}
+
+static inline void 
+json_reserve(struct json *j, int sz){
+	if (j->size + sz <= j->cap){
+		return;
+	}
+	do{
+		j->cap *= 2;
+	}while (j->cap <= j->size + sz);
+
+	j->ptr = realloc(j->ptr, j->cap);
+}
 
 static inline int32_t
 get_length(const uint8_t * data) {
@@ -157,7 +183,7 @@ read_double(lua_State *L, struct bson_reader *br) {
 		double d;
 	} v;
 	const uint8_t * b = br->ptr;
-	uint32_t lo = b[0] | b[1]<<8 | b[2]<<16 | b[3]<<24;
+	uint32_t lo = b[0] | b[1]<<8 | b[2]<<16 | b[3]<<24;		//这里又为啥是分成两部分写？应该是为了方便书写吧
 	uint32_t hi = b[4] | b[5]<<8 | b[6]<<16 | b[7]<<24;
 	v.i = (uint64_t)lo | (uint64_t)hi<<32;
 	br->ptr+=8;
@@ -223,6 +249,69 @@ write_string(struct bson *b, const char *key, size_t sz) {
 	memcpy(b->ptr + b->size, key, sz);
 	b->ptr[b->size+sz] = '\0';
 	b->size+=sz+1;
+}
+
+static void
+j_write_int32(struct json *j, int32_t v) {
+	uint32_t uv = (uint32_t)v;
+	char buffer[15];
+	int sz = sprintf(buffer, "%u", uv);
+	json_reserve(j, sz);
+	memcpy(j->ptr+j->size, buffer, sz);
+	j->size += sz;
+}
+
+static void
+j_write_int64(struct json *j, int64_t v) {
+	uint64_t uv = (uint64_t)v;
+	char buffer[25];
+	int sz = sprintf(buffer, "%I64u", uv);
+	json_reserve(j, sz);
+	memcpy(j->ptr+j->size, buffer, sz);
+	j->size += sz;
+}
+
+static void
+j_write_double(struct json *j, double d) {
+	char buffer[30];
+	int sz = sprintf(buffer, "%g", d);
+	json_reserve(j, sz);
+	memcpy(j->ptr+j->size, buffer, sz);
+	j->size += sz;
+}
+
+static void 
+j_write_boolean(struct json *j, int bv) {
+	if (bv){
+		json_reserve(j, 4);
+		memcpy(j->ptr + j->size, "true", 4);
+		j->size += 4;
+	}else {
+		json_reserve(j, 5);
+		memcpy(j->ptr + j->size, "false", 5);
+		j->size += 5;
+	}
+}
+
+static void
+j_write_byte(struct json *j, char *ch) {
+	json_reserve(j, 1);
+	j->ptr[j->size++] = *ch;
+}
+
+static void 
+j_write_string(struct json *j, const void * s, int sz){
+	json_reserve(j, 1);
+	j->ptr[j->size++] = '"';
+
+	json_reserve(j, sz);
+	uint8_t * us = (uint8_t*)s;
+	for (int i = 0; i < sz; ++i){
+		j->ptr[j->size++] = us[i];
+	}
+
+	json_reserve(j, 1);
+	j->ptr[j->size++] = '"';
 }
 
 static inline int
@@ -384,7 +473,7 @@ append_one(struct bson *bs, lua_State *L, const char *key, size_t sz, int depth)
 					luaL_error(L, "Invalid date");
 				}
 				const uint32_t * ts = (const uint32_t *)(str + 2);
-				int64_t v = (int64_t)*ts * 1000;
+				int64_t v = (int64_t)*ts * 1000;			//??乘以1000？
 				write_int64(bs, v);
 				break;
 			}
@@ -392,7 +481,7 @@ append_one(struct bson *bs, lua_State *L, const char *key, size_t sz, int depth)
 				if (len != 2+8) {
 					luaL_error(L, "Invalid timestamp");
 				}
-				const uint32_t * inc = (const uint32_t *)(str + 2);
+				const uint32_t * inc = (const uint32_t *)(str + 2);		//分开写是因为阅读上考虑吗?不可以直接write_int64?
 				const uint32_t * ts = (const uint32_t *)(str + 6);
 				write_int32(bs, *inc);
 				write_int32(bs, *ts);
@@ -424,7 +513,7 @@ append_one(struct bson *bs, lua_State *L, const char *key, size_t sz, int depth)
 			append_key(bs, BSON_STRING, key, sz);
 			int off = reserve_length(bs);
 			write_string(bs, str, len);
-			write_length(bs, len+1, off);		
+			write_length(bs, len+1, off);
 		}
 		break;
 	}
@@ -440,7 +529,7 @@ append_one(struct bson *bs, lua_State *L, const char *key, size_t sz, int depth)
 	}
 }
 
-static inline int 
+static inline int
 bson_numstr( char *str, unsigned int i ) {
 	if ( i < MAX_NUMBER) {
 		memcpy( str, bson_numstrs[i], 4 );
@@ -468,10 +557,10 @@ pack_dict_data(lua_State *L, struct bson *b, bool isarray, int depth, int kt) {
 	} else {
 		switch(kt) {
 		case LUA_TNUMBER:
-			// copy key, don't change key type
+			// copy key, don't change key type	
 			lua_pushvalue(L,-2);
 			lua_insert(L,-2);
-			key = lua_tolstring(L,-2,&sz);
+			key = lua_tolstring(L,-2,&sz);			//这里会将栈中index中的实际值转为C字符串
 			append_one(b, L, key, sz, depth);
 			lua_pop(L,2);
 			break;
@@ -533,7 +622,7 @@ pack_meta_dict(lua_State *L, struct bson *b, bool isarray, int depth) {
 
 static void
 pack_dict(lua_State *L, struct bson *b, bool isarray, int depth) {
-	int ftype = luaL_getmetafiled(L, -1, "__pairs");
+	int ftype = luaL_getmetafield(L, -1, "__pairs");
 	if (ftype == LUA_TFUNCTION) {
 		pack_meta_dict(L, b, isarray, depth);
 	} else {
@@ -559,7 +648,7 @@ pack_ordered_dict(lua_State *L, struct bson *b, int n, int depth) {
 	write_byte(b,0);
 	write_length(b, b->size - length, length);
 }
- 
+
 static int
 ltostring(lua_State *L) {
 	size_t sz = lua_rawlen(L, 1);
@@ -656,7 +745,7 @@ unpack_dict(lua_State *L, struct bson_reader *br, bool array) {
 		case BSON_MINKEY:
 		case BSON_MAXKEY:
 		case BSON_NULL: {
-			char key[] = { 0, bt };
+			char key[] = { 0, bt };				//？？？
 			lua_pushlstring(L, key, sizeof(key));
 			break;
 		}
@@ -724,6 +813,139 @@ unpack_dict(lua_State *L, struct bson_reader *br, bool array) {
 			continue;
 		}
 		lua_rawset(L,-3);
+	}	
+}
+
+static void
+j_unpack_dict(lua_State *L, struct bson_reader *br, bool array, struct json *j){
+	if (array){
+		j_write_byte(j, "[");
+	} else {
+		j_write_byte(j, "{");
+	}
+
+	j_write_byte(j, " ");
+
+	luaL_checkstack(L, 16, NULL);
+	int sz = read_int32(L, br);
+	const void * bytes = read_bytes(L, br, sz-5);
+	struct bson_reader t = { bytes, sz - 5};
+	int end = read_byte(L, br);
+	if (end != '\0'){
+		luaL_error(L, "Invalid document end");
+	}
+
+	for (;;) {
+		if (t.size == 0)
+			break;
+		int bt = read_byte(L, &t);
+		size_t klen = 0 ;
+		const char *key  = read_cstring(L, &t, &klen);
+		if (!array){
+			j_write_string(j, key, klen);
+			j_write_byte(j,":");
+			j_write_byte(j," ");
+		}
+		switch (bt) {
+		case BSON_REAL:
+			j_write_double(j, read_double(L,&t));
+			break;
+		case BSON_BOOLEAN:
+			j_write_boolean(j, read_byte(L, &t));
+			break;
+		case BSON_STRING:{
+			int sz = read_int32(L, &t);
+			if (sz <= 0){
+				luaL_error(L, "Invalid bson string , length = %d", sz);
+			}
+			j_write_string(j, read_bytes(L, &t, sz), sz-1);
+			break;
+		}
+		case BSON_DOCUMENT:
+			j_unpack_dict(L, &t, false, j);
+			break;
+		case BSON_ARRAY:
+			j_unpack_dict(L, &t, true, j);
+			break;
+		case BSON_BINARY: {
+			int sz = read_int32(L, &t);
+			read_byte(L, &t);
+			j_write_string(j, read_bytes(L, &t, sz), sz);
+			break;
+		}
+		case BSON_OBJECTID:
+			make_object(L, BSON_OBJECTID, read_bytes(L, &t, 12), 12);
+			break;
+		case BSON_DATE: {
+			int64_t date = read_int64(L, &t);
+			uint32_t v = date / 1000;
+			j_write_int32(j,v);
+			break;
+		}
+		case BSON_MINKEY:
+		case BSON_MAXKEY:
+		case BSON_NULL: {
+			char key[] = { 0, bt };				//？？？
+			j_write_string(j, key, sizeof(key));
+			break;
+		}
+		case BSON_REGEX: {
+			size_t rlen1=0;
+			size_t rlen2=0;
+			const char * r1 = read_cstring(L, &t, &rlen1);
+			const char * r2 = read_cstring(L, &t, &rlen2);
+			j_write_string(j, r1, rlen1);
+			j_write_string(j, r2, rlen2);
+			break;
+		}
+		case BSON_INT32:
+			j_write_int32(j, read_int32(L, &t));
+			break;
+		case BSON_TIMESTAMP: {
+			int32_t inc = read_int32(L, &t);
+			int32_t ts = read_int32(L, &t);
+
+			j_write_int32(j, inc);
+			j_write_int32(j, ts);
+			break;
+		}
+		case BSON_INT64:
+			j_write_int64(j, read_int64(L, &t));
+			break;
+		case BSON_DBPOINTER: {
+			int sz = read_int32(L, &t);
+			read_bytes(L, &t, sz+12);
+			break;
+		}
+		case BSON_JSCODE:
+		case BSON_SYMBOL: {
+			int sz = read_int32(L, &t);
+			read_bytes(L, &t, sz);
+			break;
+		}
+		case BSON_CODEWS: {
+			int sz = read_int32(L, &t);
+			read_bytes(L, &t, sz-4);
+			break;
+		}
+		default:
+			// unsupported
+			luaL_error(L, "Invalid bson type : %d", bt);
+			lua_pop(L,1);
+			continue;
+		}
+		
+		if (t.size > 0 ){
+			j_write_byte(j, ",");
+			j_write_byte(j, " ");	
+		}
+	}
+
+	j_write_byte(j, " ");
+	if (array){
+		j_write_byte(j, "]");
+	} else {
+		j_write_byte(j, "}");
 	}
 }
 
@@ -743,7 +965,7 @@ lmakeindex(lua_State *L) {
 		int field_size = 0;
 		switch (bt) {
 		case BSON_INT64:
-		case BSON_TIMESTAMP: 
+		case BSON_TIMESTAMP:
 		case BSON_DATE:
 		case BSON_REAL:
 			field_size = 8;
@@ -752,7 +974,7 @@ lmakeindex(lua_State *L) {
 			field_size = 1;
 			break;
 		case BSON_JSCODE:
-		case BSON_SYMBOL: 
+		case BSON_SYMBOL:
 		case BSON_STRING: {
 			int sz = read_int32(L, &br);
 			read_bytes(L, &br, sz);
@@ -935,12 +1157,36 @@ ldecode(lua_State *L) {
 	return 1;
 }
 
+static int
+ltojson(lua_State *L) {
+	const int32_t * data = lua_touserdata(L,1);
+	if (data == NULL){
+	   return 0;	
+	}
+	const uint8_t *b = (const uint8_t *)data;
+	int32_t len = get_length(b);
+	if (len == 0) {
+		lua_pushstring(L,"{ }");
+	}else{
+		struct json j;
+		json_create(&j,len + DEFAULT_EXT);
+		
+		struct bson_reader br = { b, len};
+		j_unpack_dict(L, &br, false, &j);
+
+		lua_pushlstring(L, (const char*)j.ptr, j.size);
+	}
+
+	return 1;
+}
+
 static void
 bson_meta(lua_State *L) {
 	if (luaL_newmetatable(L, "bson")) {
 		luaL_Reg l[] = {
 			{ "decode", ldecode },
 			{ "makeindex", lmakeindex },
+			{"tojson", ltojson },
 			{ NULL, NULL },
 		};
 		luaL_newlib(L,l);
@@ -1282,9 +1528,9 @@ lobjectid(lua_State *L) {
 		oid[4] = (ti>>8) & 0xff;
 		oid[5] = ti & 0xff;
 		memcpy(oid+6 , oid_header, 5);
-		oid[11] = (oid_counter>>16) & 0xff; 
-		oid[12] = (oid_counter>>8) & 0xff; 
-		oid[13] = oid_counter & 0xff; 
+		oid[11] = (oid_counter>>16) & 0xff;
+		oid[12] = (oid_counter>>8) & 0xff;
+		oid[13] = oid_counter & 0xff;
 		++oid_counter;
 	}
 	lua_pushlstring( L, (const char *)oid, 14);
@@ -1303,7 +1549,7 @@ luaopen_bson(lua_State *L) {
 	}
 	luaL_Reg l[] = {
 		{ "encode", lencode },
-		{ "encode_order", lencode_order },
+		{ "encode_order", lencode_order },	//mongodb某些情况下需要key是有序的，所以实现这个接口，但是这个接口不保证有序性，需要调接口的人来确保key的有序
 		{ "date", ldate },
 		{ "timestamp", ltimestamp  },
 		{ "regex", lregex },
@@ -1330,4 +1576,3 @@ luaopen_bson(lua_State *L) {
 
 	return 1;
 }
-
